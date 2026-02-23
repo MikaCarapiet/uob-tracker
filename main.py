@@ -1,10 +1,11 @@
 """
 UOB Transaction Tracker
 -----------------------
-Polls Gmail for UOB transaction alert emails, parses them,
-auto-categorizes where possible, logs to CSV, and notifies via Telegram.
+Uses gog CLI to read Gmail + write to Google Sheets.
+No IMAP, no app passwords, no local CSV.
 
-If category is unknown → sends Telegram message with inline buttons to categorize manually.
+Flow:
+  gog gmail search → parse → categorize → gog sheets append → Telegram notify
 """
 
 import os
@@ -35,42 +36,41 @@ def get_env(key: str) -> str:
 
 
 def run():
-    gmail_address     = get_env("GMAIL_ADDRESS")
-    gmail_app_password = get_env("GMAIL_APP_PASSWORD")
-    telegram_token    = get_env("TELEGRAM_BOT_TOKEN")
-    telegram_chat_id  = get_env("TELEGRAM_CHAT_ID")
-    uob_sender        = os.getenv("UOB_SENDER_EMAIL", "PaymentAlert@uob.com.sg")
-    poll_interval     = int(os.getenv("POLL_INTERVAL", "60"))
-    tx_log_path       = os.getenv("TRANSACTIONS_LOG", "transactions.csv")
+    gog_bin          = os.getenv("GOG_BIN", "/home/node/.local/bin/gog")
+    gog_account      = get_env("GOG_ACCOUNT")
+    telegram_token   = get_env("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = get_env("TELEGRAM_CHAT_ID")
+    uob_sender       = os.getenv("UOB_SENDER_EMAIL", "PaymentAlert@uob.com.sg")
+    sheet_id         = get_env("GOOGLE_SHEET_ID")
+    poll_interval    = int(os.getenv("POLL_INTERVAL", "60"))
 
-    log.info("UOB Tracker started. Polling every %ds.", poll_interval)
-    log.info("Watching for emails from: %s", uob_sender)
+    log.info("UOB Tracker started. Polling every %ds via gog.", poll_interval)
 
     while True:
         try:
-            emails = list(fetch_unread_uob_emails(gmail_address, gmail_app_password, uob_sender))
+            emails = list(fetch_unread_uob_emails(gog_bin, gog_account, uob_sender))
 
             if not emails:
                 log.debug("No new UOB emails.")
             else:
                 log.info("Found %d new UOB email(s).", len(emails))
 
-            for uid, subject, body in emails:
-                log.info("Processing email UID %s | Subject: %s", uid, subject)
+            for msg_id, subject, body in emails:
+                log.info("Processing message %s | %s", msg_id, subject)
 
                 tx = parse_uob_email(subject, body)
                 if not tx:
-                    log.warning("Could not parse email UID %s. Skipping.", uid)
+                    log.warning("Could not parse message %s. Skipping.", msg_id)
                     continue
 
-                category = auto_categorize(tx.description)
-                tx.category = category
+                tx.category = auto_categorize(tx.description)
 
-                log_transaction(tx, tx_log_path)
-                log.info("Logged: %s %s %.2f | %s | Category: %s",
-                         tx.tx_type, tx.currency, tx.amount, tx.description, tx.category)
+                log_transaction(tx, gog_bin, gog_account, sheet_id)
+                log.info("Logged to Sheets: %s %s %.2f | %s | %s",
+                         tx.tx_type, tx.currency, tx.amount,
+                         tx.description, tx.category)
 
-                if category:
+                if tx.category:
                     send_logged_notification(telegram_token, telegram_chat_id, tx)
                 else:
                     send_categorization_prompt(telegram_token, telegram_chat_id, tx)

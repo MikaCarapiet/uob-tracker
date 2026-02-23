@@ -1,82 +1,51 @@
 """
-Gmail IMAP watcher.
-Polls for unread UOB transaction alert emails and yields raw (subject, body) tuples.
-Uses Gmail App Password — no OAuth needed.
+Gmail watcher via gog CLI.
+Fetches unread UOB transaction emails without IMAP or app passwords.
+Requires: gog authenticated with Gmail access.
 """
 
-import imaplib
-import email
-import email.header
-import os
+import json
+import subprocess
 from typing import Generator, Tuple
 
 
-def _decode_header(raw) -> str:
-    parts = email.header.decode_header(raw)
-    decoded = []
-    for part, charset in parts:
-        if isinstance(part, bytes):
-            decoded.append(part.decode(charset or "utf-8", errors="replace"))
-        else:
-            decoded.append(part)
-    return "".join(decoded)
-
-
-def _get_body(msg) -> str:
-    """Extract plain text body from email."""
-    if msg.is_multipart():
-        for part in msg.walk():
-            ct = part.get_content_type()
-            disp = str(part.get("Content-Disposition") or "")
-            if ct == "text/plain" and "attachment" not in disp:
-                charset = part.get_content_charset() or "utf-8"
-                return part.get_payload(decode=True).decode(charset, errors="replace")
-        # Fallback to HTML if no plain text
-        for part in msg.walk():
-            if part.get_content_type() == "text/html":
-                charset = part.get_content_charset() or "utf-8"
-                raw_html = part.get_payload(decode=True).decode(charset, errors="replace")
-                # Strip tags crudely
-                import re
-                return re.sub(r"<[^>]+>", " ", raw_html)
-    else:
-        charset = msg.get_content_charset() or "utf-8"
-        return msg.get_payload(decode=True).decode(charset, errors="replace")
-    return ""
-
-
 def fetch_unread_uob_emails(
-    gmail_address: str,
-    gmail_app_password: str,
+    gog_bin: str,
+    account: str,
     uob_sender: str,
 ) -> Generator[Tuple[str, str, str], None, None]:
     """
-    Connect to Gmail via IMAP, find unread emails from UOB sender,
-    yield (uid, subject, body), then mark them as read.
+    Use gog CLI to search for unread UOB transaction emails.
+    Yields (message_id, subject, body) for each match.
     """
-    with imaplib.IMAP4_SSL("imap.gmail.com") as imap:
-        imap.login(gmail_address, gmail_app_password)
-        imap.select("INBOX")
+    query = f"from:{uob_sender} is:unread"
 
-        # Search for unread emails from UOB sender
-        status, data = imap.search(
-            None, f'(UNSEEN FROM "{uob_sender}")'
+    result = subprocess.run(
+        [gog_bin, "gmail", "messages", "search", query,
+         "--max", "20", "--account", account, "--json"],
+        capture_output=True, text=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"gog gmail search failed: {result.stderr}")
+
+    data = json.loads(result.stdout)
+    messages = data.get("results", data) if isinstance(data, dict) else data
+
+    for msg in messages:
+        msg_id = msg.get("id", "")
+        subject = msg.get("subject", "")
+        body = msg.get("body", msg.get("snippet", ""))
+
+        if not body:
+            continue
+
+        yield msg_id, subject, body
+
+        # Mark as read
+        subprocess.run(
+            [gog_bin, "gmail", "messages", "modify", msg_id,
+             "--remove-labels", "UNREAD",
+             "--account", account, "--no-input"],
+            capture_output=True, text=True
         )
-        if status != "OK":
-            return
-
-        uids = data[0].split()
-        for uid in uids:
-            status, msg_data = imap.fetch(uid, "(RFC822)")
-            if status != "OK":
-                continue
-
-            raw_email = msg_data[0][1]
-            msg = email.message_from_bytes(raw_email)
-            subject = _decode_header(msg.get("Subject", ""))
-            body = _get_body(msg)
-
-            yield uid.decode(), subject, body
-
-            # Mark as read
-            imap.store(uid, "+FLAGS", "\\Seen")

@@ -1,28 +1,53 @@
 # UOB Transaction Tracker
 
-Auto-logs UOB Singapore transaction alert emails to CSV and notifies via Telegram.
+Reads UOB Singapore transaction alert emails via Gmail, logs them to Google Sheets, and notifies via Telegram.
 
-**Flow:**
-1. UOB sends a transaction alert email to your Gmail
-2. This script polls Gmail via IMAP every N seconds
-3. Parses the email → extracts amount, merchant, type, date
-4. Auto-categorizes based on merchant keywords
-5. Logs to `transactions.csv`
-6. If category is **known** → sends a Telegram confirmation
-7. If category is **unknown** → sends a Telegram prompt with inline buttons to categorize manually
+No IMAP. No app passwords. No local CSV. Uses `gog` CLI (already authenticated via OAuth).
+
+---
+
+## Flow
+
+```
+Gmail (UOB alert arrives)
+        ↓
+gog gmail messages search → fetch unread UOB emails
+        ↓
+parser.py → extract amount, type, merchant, date
+        ↓
+categorizer.py → keyword match → category or None
+        ↓
+gog sheets append → log to Google Sheet
+        ↓
+    [category?]
+    /         \
+  YES          NO
+   ↓            ↓
+Telegram      Telegram inline buttons
+confirm       → you tap → category saved
+```
+
+---
+
+## Prerequisites
+
+- `gog` CLI authenticated with your Gmail account
+  - Install: `brew install steipete/tap/gogcli`
+  - Auth: `gog auth add you@gmail.com --services gmail,sheets`
+- Python 3.10+
 
 ---
 
 ## Setup
 
-### 1. Clone the repo
+### 1. Clone
 
 ```bash
 git clone https://github.com/MikaCarapiet/uob-tracker.git
 cd uob-tracker
 ```
 
-### 2. Install dependencies
+### 2. Install Python dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -34,71 +59,51 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` with your values:
+Edit `.env`:
 
 | Variable | Description |
 |---|---|
-| `GMAIL_ADDRESS` | Your Gmail address |
-| `GMAIL_APP_PASSWORD` | Gmail App Password (not your main password) |
-| `TELEGRAM_BOT_TOKEN` | Your Telegram bot token (from @BotFather) |
+| `GOG_BIN` | Path to gog binary (default: `/home/node/.local/bin/gog`) |
+| `GOG_ACCOUNT` | Your Gmail address |
+| `GOOGLE_SHEET_ID` | Sheet ID from the URL |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token (from @BotFather) |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat/user ID |
 | `UOB_SENDER_EMAIL` | UOB sender (default: `PaymentAlert@uob.com.sg`) |
-| `POLL_INTERVAL` | How often to check email in seconds (default: `60`) |
-| `TRANSACTIONS_LOG` | CSV output path (default: `transactions.csv`) |
+| `POLL_INTERVAL` | Seconds between checks (default: `60`) |
 
-### 4. Enable Gmail IMAP + App Password
-
-1. Gmail → Settings → See all settings → Forwarding and POP/IMAP → **Enable IMAP**
-2. Google Account → Security → 2-Step Verification → **App Passwords**
-3. Generate an app password for "Mail" and paste it as `GMAIL_APP_PASSWORD`
-
-### 5. Enable UOB eAlerts
+### 4. Enable UOB eAlerts
 
 1. Log in to UOB Personal Internet Banking
 2. Go to **My Alerts** → enable transaction alerts → set delivery to **email**
 
-### 6. Run
+### 5. Run
 
 ```bash
 python main.py
 ```
 
-Or run as a background service:
-
-```bash
-nohup python main.py >> tracker.log 2>&1 &
-```
-
 ---
 
-## Output
+## Google Sheet
 
-`transactions.csv` columns:
+Columns: `Date | Type | Currency | Amount | Description | Category | Account | Logged At`
 
-| date | type | currency | amount | description | category | account_last4 | logged_at |
-|---|---|---|---|---|---|---|---|
+Sheet is created automatically — no manual setup needed.
 
 ---
 
 ## Auto-categories
 
-The categorizer matches merchant keywords to:
-- Food & Drink
-- Transport
-- Groceries
-- Shopping
-- Entertainment
-- Bills & Utilities
-- Health & Fitness
-- Travel
-- El Matador
+Keyword matching in `categorizer.py` → `CATEGORIES` dict:
 
-Add your own keywords in `categorizer.py` → `CATEGORIES` dict.
+- Food & Drink, Transport, Groceries, Shopping, Entertainment
+- Bills & Utilities, Health & Fitness, Travel, El Matador
+
+Unknown merchants trigger a Telegram prompt with inline buttons.
 
 ---
 
 ## Notes
 
-- No credentials are ever stored in code — `.env` is gitignored
-- `transactions.csv` is gitignored (your financial data stays local)
-- The parser handles UOB SG email formats; may need tuning if UOB changes their template
+- `.env` and `transactions.csv` are gitignored — your data stays private
+- No credentials in code, ever

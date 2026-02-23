@@ -1,32 +1,35 @@
 """
-CSV transaction logger.
-Appends transactions to a local CSV file.
+Google Sheets logger via gog CLI.
+Appends transactions to the UOB Transaction Tracker sheet.
 """
 
-import csv
-import os
-from datetime import datetime
+import json
+import subprocess
+from datetime import datetime, timezone
 from parser import Transaction
 
 
-FIELDNAMES = ["date", "type", "currency", "amount", "description", "category", "account_last4", "logged_at"]
+def log_transaction(tx: Transaction, gog_bin: str, account: str, sheet_id: str) -> None:
+    """Append a transaction row to the Google Sheet."""
+    row = [[
+        tx.date,
+        tx.tx_type,
+        tx.currency,
+        tx.amount,
+        tx.description,
+        tx.category or "Uncategorized",
+        tx.account_last4,
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    ]]
 
+    result = subprocess.run(
+        [gog_bin, "sheets", "append", sheet_id, "Sheet1!A:H",
+         "--values-json", json.dumps(row),
+         "--insert", "INSERT_ROWS",
+         "--input", "USER_ENTERED",
+         "--account", account, "--no-input"],
+        capture_output=True, text=True
+    )
 
-def log_transaction(tx: Transaction, filepath: str) -> None:
-    """Append a transaction to the CSV log."""
-    file_exists = os.path.isfile(filepath)
-
-    with open(filepath, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow({
-            "date": tx.date,
-            "type": tx.tx_type,
-            "currency": tx.currency,
-            "amount": tx.amount,
-            "description": tx.description,
-            "category": tx.category or "Uncategorized",
-            "account_last4": tx.account_last4,
-            "logged_at": datetime.utcnow().isoformat(),
-        })
+    if result.returncode != 0:
+        raise RuntimeError(f"gog sheets append failed: {result.stderr}")
